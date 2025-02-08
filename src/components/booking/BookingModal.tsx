@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { X } from 'lucide-react';
-import { supabase } from '../../../lib/supabase';
-import PersonalDetailsForm from './PersonalDetailsForm';
-import OccasionDetailsForm from './OccasionDetailsForm';
-import PackageSelectionForm from './PackageSelectionForm';
-import BookingSummary from './BookingSummary';
-import ConfirmationModal from './ConfirmationModal';
-import { calculatePrice } from '../../../utils/pricing';
-import type { BookingFormData } from '../../../types/booking';
+import { supabase } from '../lib/supabase';
+import PersonalDetailsForm from './booking/PersonalDetailsForm';
+import OccasionDetailsForm from './booking/OccasionDetailsForm';
+import PackageSelectionForm from './booking/PackageSelectionForm';
+import BookingSummary from './booking/BookingSummary';
+import ConfirmationModal from './booking/ConfirmationModal';
+import { calculatePrice } from '../utils/pricing';
+import type { BookingFormData } from '../types/booking';
 
 interface BookingModalProps {
   isOpen: boolean;
@@ -18,7 +18,7 @@ const initialBookingData: BookingFormData = {
   name: '',
   phone: '',
   email: '',
-  address: '',
+  address: 'N/A',
   location: '',
   date: '',
   time: '',
@@ -42,10 +42,64 @@ export default function BookingModal({ isOpen, onClose }: BookingModalProps) {
   const [error, setError] = useState('');
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [bookingId, setBookingId] = useState('');
+  const [activityId, setActivityId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setBookingData(initialBookingData);
+      setCurrentStep(1);
+      setError('');
+      setShowConfirmation(false);
+      setBookingId('');
+      setActivityId(null);
+      document.body.style.overflow = 'hidden';
+    } else {
+      document.body.style.overflow = 'unset';
+    }
+    return () => {
+      document.body.style.overflow = 'unset';
+    };
+  }, [isOpen]);
 
   useEffect(() => {
     setTotalPrice(calculatePrice(bookingData));
   }, [bookingData]);
+
+  const trackActivity = async (step: number) => {
+    try {
+      if (!bookingData.name || !bookingData.email || !bookingData.phone) {
+        return;
+      }
+
+      const activityData = {
+        name: bookingData.name,
+        email: bookingData.email,
+        phone: bookingData.phone,
+        step_completed: step,
+        last_active: new Date().toISOString()
+      };
+
+      if (activityId) {
+        const { error } = await supabase
+          .from('booking_activities')
+          .update(activityData)
+          .eq('id', activityId);
+
+        if (error) throw error;
+      } else {
+        const { data, error } = await supabase
+          .from('booking_activities')
+          .insert([activityData])
+          .select()
+          .single();
+
+        if (error) throw error;
+        if (data) setActivityId(data.id);
+      }
+    } catch (err) {
+      console.error('Error tracking activity:', err);
+    }
+  };
 
   const handlePersonalDetailsUpdate = (field: string, value: string) => {
     setBookingData(prev => ({ ...prev, [field]: value }));
@@ -84,7 +138,7 @@ export default function BookingModal({ isOpen, onClose }: BookingModalProps) {
   };
 
   const validatePersonalDetails = () => {
-    if (!bookingData.name || !bookingData.phone || !bookingData.email || !bookingData.address) {
+    if (!bookingData.name || !bookingData.phone || !bookingData.email) {
       setError('Please fill in all personal details');
       return false;
     }
@@ -107,6 +161,7 @@ export default function BookingModal({ isOpen, onClose }: BookingModalProps) {
     
     if (currentStep === 1) {
       if (validatePersonalDetails()) {
+        await trackActivity(1);
         setCurrentStep(2);
       }
       return;
@@ -119,24 +174,51 @@ export default function BookingModal({ isOpen, onClose }: BookingModalProps) {
     setSubmitting(true);
     
     try {
+      await trackActivity(2);
+
       const bookingPayload = {
-        ...bookingData,
+        name: bookingData.name,
+        phone: bookingData.phone,
+        email: bookingData.email,
+        address: bookingData.address,
+        location: bookingData.location,
+        date: bookingData.date,
+        time: bookingData.time,
+        package: bookingData.package,
+        occasion: bookingData.occasion,
+        occasion_details: bookingData.occasion_details,
+        cake: bookingData.cake,
         needs_package: bookingData.needs_package === 'Yes',
+        additional_options: bookingData.additional_options,
         total_price: calculatePrice(bookingData),
         status: 'pending'
       };
 
-      const { data, error: saveError } = await supabase
+      const { data: bookingData, error: bookingError } = await supabase
         .from('bookings')
         .insert([bookingPayload])
-        .select('id')
+        .select()
         .single();
 
-      if (saveError) throw saveError;
+      if (bookingError) {
+        throw new Error(bookingError.message);
+      }
 
-      setBookingId(data.id);
+      if (!bookingData?.id) {
+        throw new Error('Failed to create booking');
+      }
+
+      setBookingId(bookingData.id);
       setShowConfirmation(true);
+
+      if (activityId) {
+        await supabase
+          .from('booking_activities')
+          .delete()
+          .eq('id', activityId);
+      }
     } catch (err: any) {
+      console.error('Booking error:', err);
       setError(err.message || 'Failed to save booking. Please try again.');
     } finally {
       setSubmitting(false);
@@ -148,6 +230,8 @@ export default function BookingModal({ isOpen, onClose }: BookingModalProps) {
     setCurrentStep(1);
     setError('');
     setShowConfirmation(false);
+    setBookingId('');
+    setActivityId(null);
     onClose();
   };
 
@@ -155,78 +239,90 @@ export default function BookingModal({ isOpen, onClose }: BookingModalProps) {
 
   return (
     <>
-      <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-lg max-w-md w-full p-6 relative overflow-y-auto max-h-[90vh]">
-          <button
-            onClick={handleClose}
-            className="absolute top-4 right-4 text-gray-500 hover:text-gray-700"
-          >
-            <X className="w-6 h-6" />
-          </button>
-
-          <h2 className="text-2xl font-bold mb-6">Book Your Private Theater</h2>
-
-          {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-md">
-              {error}
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} className="space-y-6">
-            {currentStep === 1 ? (
-              <>
-                <PersonalDetailsForm
-                  bookingData={bookingData}
-                  onUpdate={handlePersonalDetailsUpdate}
-                />
+      <div className="fixed inset-0 bg-black bg-opacity-50 z-50 overflow-y-auto">
+        <div className="min-h-screen px-4 text-center">
+          <span className="inline-block h-screen align-middle" aria-hidden="true">&#8203;</span>
+          
+          <div className="inline-block w-full max-w-md text-left align-middle transition-all transform bg-white shadow-xl rounded-2xl">
+            <div className="relative">
+              <div className="sticky top-0 bg-white px-6 py-4 border-b z-10 rounded-t-2xl">
                 <button
-                  type="submit"
-                  className="w-full bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700 transition duration-200"
+                  onClick={handleClose}
+                  className="absolute right-4 top-4 text-gray-400 hover:text-gray-500 focus:outline-none"
                 >
-                  Continue to Booking Details
+                  <X className="w-6 h-6" />
                 </button>
-              </>
-            ) : (
-              <>
-                <OccasionDetailsForm
-                  occasion={bookingData.occasion}
-                  onOccasionChange={handleOccasionChange}
-                  onDetailsChange={handleOccasionDetailsChange}
-                />
-                
-                <PackageSelectionForm
-                  selectedPackage={bookingData.package}
-                  needsPackage={bookingData.needs_package}
-                  onPackageChange={handlePackageChange}
-                  onAdditionalOptionChange={handleAdditionalOptionsChange}
-                  additionalOptions={bookingData.additional_options}
-                  cake={bookingData.cake}
-                />
+                <h2 className="text-2xl font-bold text-gray-900">Book Your Private Theater</h2>
+              </div>
 
-                <BookingSummary
-                  bookingData={bookingData}
-                  totalPrice={totalPrice}
-                />
+              <div className="px-6 py-4 max-h-[calc(100vh-200px)] overflow-y-auto">
+                {error && (
+                  <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-md">
+                    {error}
+                  </div>
+                )}
 
-                <div className="flex gap-4">
+                <form onSubmit={handleSubmit} className="space-y-6">
+                  {currentStep === 1 ? (
+                    <PersonalDetailsForm
+                      bookingData={bookingData}
+                      onUpdate={handlePersonalDetailsUpdate}
+                    />
+                  ) : (
+                    <>
+                      <OccasionDetailsForm
+                        occasion={bookingData.occasion}
+                        onOccasionChange={handleOccasionChange}
+                        onDetailsChange={handleOccasionDetailsChange}
+                      />
+                      
+                      <PackageSelectionForm
+                        selectedPackage={bookingData.package}
+                        needsPackage={bookingData.needs_package}
+                        onPackageChange={handlePackageChange}
+                        onAdditionalOptionChange={handleAdditionalOptionsChange}
+                        additionalOptions={bookingData.additional_options}
+                        cake={bookingData.cake}
+                      />
+
+                      <BookingSummary
+                        bookingData={bookingData}
+                        totalPrice={totalPrice}
+                      />
+                    </>
+                  )}
+                </form>
+              </div>
+
+              <div className="sticky bottom-0 bg-white px-6 py-4 border-t">
+                {currentStep === 1 ? (
                   <button
-                    type="button"
-                    onClick={() => setCurrentStep(1)}
-                    className="flex-1 bg-gray-200 text-gray-800 py-2 px-4 rounded-md hover:bg-gray-300 transition duration-200"
+                    onClick={handleSubmit}
+                    className="w-full bg-indigo-600 text-white py-3 px-4 rounded-xl hover:bg-indigo-700 transition duration-200 font-medium"
                   >
-                    Back
+                    Continue to Booking Details
                   </button>
-                  <button
-                    type="submit"
-                    disabled={submitting}
-                    className="flex-1 bg-indigo-600 text-white py-2 px-4 rounded-md hover:bg-indigo-700 transition duration-200 disabled:opacity-50"
-                  >
-                    {submitting ? 'Confirming...' : 'Confirm Booking'}
-                  </button>
-                </div>
-              </>
-            )}
-          </form>
+                ) : (
+                  <div className="flex gap-4">
+                    <button
+                      type="button"
+                      onClick={() => setCurrentStep(1)}
+                      className="flex-1 bg-gray-100 text-gray-800 py-3 px-4 rounded-xl hover:bg-gray-200 transition duration-200 font-medium"
+                    >
+                      Back
+                    </button>
+                    <button
+                      onClick={handleSubmit}
+                      disabled={submitting}
+                      className="flex-1 bg-indigo-600 text-white py-3 px-4 rounded-xl hover:bg-indigo-700 transition duration-200 font-medium disabled:opacity-50"
+                    >
+                      {submitting ? 'Confirming...' : 'Confirm Booking'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
